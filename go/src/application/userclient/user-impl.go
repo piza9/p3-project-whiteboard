@@ -3,13 +3,13 @@ package userclient
 import (
 	"encoding/json"
 	"fmt"
-	"midclient"
+	// "fsnotify"
+	"application/midclient"
 	"os"
+	// "path/filepath"
+	"protos/storageproto"
+	"protos/userproto"
 	"strings"
-	//"path/filepath"
-	"storageproto"
-	"time"
-	"userproto"
 )
 
 type Userclient struct {
@@ -116,8 +116,8 @@ func (uc *Userclient) iAuthenticateUser(args *userproto.AuthenticateUserArgs, re
 					return unmarshalErr
 				}
 
-				uc.iWalkDirectoryStructure(classkey)
-
+				uc.iWalkDirectoryStructure(classkey) // creates cache of available files
+				uc.iInitialFileCheck()               // updates outdated file on local on login
 			}
 		} else {
 			reply.Status = userproto.WRONGPASSWORD
@@ -135,88 +135,80 @@ func (uc *Userclient) MonitorServer() {
 }
 
 //To reflect changes in the local
-func (uc *Userclient) iMonitoryLocal() {
-	for {
-		time.Sleep(10 * time.Second)
-		<-uc.fileKeyMutex
-		cache := uc.fileKeyMap
-		uc.fileKeyMutex <- 1
-		for filepath, filekey := range cache {
-			file, fileOpenErr := os.Open(filepath) //Opens
-			if fileOpenErr != nil {
-				fmt.Printf("File %v open error\n", filepath)
-				//call Midclient Delete function
-			} else {
-				fileinfo, statErr := file.Stat()
-				if statErr == nil {
-					syncfileJSON, getErr := uc.midclient.Get(filekey)
-					if getErr == nil {
-						//If no errors, get file off of server to compare
-						var syncFile *storageproto.SyncFile
-						syncBytes := []byte(syncfileJSON)
-						_ = json.Unmarshal(syncBytes, &syncFile)
-						// if unmarshalErr == nil { fmt.Println("Unmarshal error.\n") }
+func (uc *Userclient) iInitialFileCheck() {
+	cache := uc.fileKeyMap
+	uc.fileKeyMutex <- 1
+	for filepath, filekey := range cache {
+		file, fileOpenErr := os.Open(filepath) //Opens
+		if fileOpenErr != nil {
+			fmt.Printf("File %v open error\n", filepath)
+			//call Midclient Delete function
+		} else {
+			fileinfo, statErr := file.Stat()
+			if statErr == nil {
+				syncfileJSON, getErr := uc.midclient.Get(filekey)
+				if getErr == nil {
+					//If no errors, get file off of server to compare
+					var syncFile *storageproto.SyncFile
+					syncBytes := []byte(syncfileJSON)
+					_ = json.Unmarshal(syncBytes, &syncFile)
+					// if unmarshalErr == nil { fmt.Println("Unmarshal error.\n") }
 
-						//If local was updated more recently, put local to server
-						syncFileInfo, _ := syncFile.File.Stat()
-						if fileinfo.ModTime().After(syncFileInfo.ModTime()) {
-							//If has permissions, overwrite.
-							//Additionally, if student in class, take old sync file as original
-							if syncFile.Permissions[uc.user.Username] == storageproto.WRITE {
-								if uc.user.Classes[syncFile.Class] == userproto.STUDENT {
+					//If local was updated more recently, put local to server
+					syncFileInfo, _ := syncFile.File.Stat()
+					if fileinfo.ModTime().After(syncFileInfo.ModTime()) {
+						//If has permissions, overwrite.
+						//Additionally, if student in class, take old sync file as original
+						if syncFile.Permissions[uc.user.Username] == storageproto.WRITE {
+							syncFile.File = file
+							fileJSON, _ := json.Marshal(syncFile)
 
-								}
-								syncFile.File = file
-								syncFile.FileInfo = &fileinfo
-								fileJSON, _ := json.Marshal(syncFile)
-
-								createErr := uc.midclient.Put(filekey, string(fileJSON))
-								if createErr != nil {
-									fmt.Println("Creation error!\n")
-								}
-
-							} else { //If not, make new file in storage with owner as this student
-								syncFile.File = file
-								syncFile.FileInfo = &fileinfo
-								syncFile.Owner = uc.user
-
-								fileJSON, _ := json.Marshal(syncFile)
-								//Put new file in storage server
-								newkey := uc.user.Username + ":" + strings.Split(filekey, ":")[1]
-								createErr := uc.midclient.Put(newkey, string(fileJSON))
-								if createErr != nil {
-									fmt.Println("Creation error!\n")
-								}
-								//Associate with class
-								classkey := syncFile.Class
-								classJSON, _ := uc.midclient.Get(classkey)
-
-								var classFile storageproto.SyncFile
-								classBytes := []byte(classJSON)
-								json.Unmarshal(classBytes, &classFile)
-
-								classFile.Files = append(classFile.Files, newkey)
-								classJSONEdit, _ := json.Marshal(classFile)
-								uc.midclient.Put(classkey, string(classJSONEdit))
+							createErr := uc.midclient.Put(filekey, string(fileJSON))
+							if createErr != nil {
+								fmt.Println("Creation error!\n")
 							}
 
-						} else { //else, copy server to local...that is if server is newer
-							file.Truncate(fileinfo.Size())
-							var content []byte
-							_, readErr := syncFile.File.Read(content)
-							if readErr == nil {
-								file.Write(content)
+						} else { //If not, make new file in storage with owner as this student
+							syncFile.File = file
+							syncFile.Owner = uc.user
+
+							fileJSON, _ := json.Marshal(syncFile)
+							//Put new file in storage server
+							newkey := uc.user.Username + ":" + strings.Split(filekey, ":")[1]
+							createErr := uc.midclient.Put(newkey, string(fileJSON))
+							if createErr != nil {
+								fmt.Println("Creation error!\n")
 							}
+							//Associate with class
+							classkey := syncFile.Class
+							classJSON, _ := uc.midclient.Get(classkey)
+
+							var classFile storageproto.SyncFile
+							classBytes := []byte(classJSON)
+							json.Unmarshal(classBytes, &classFile)
+
+							classFile.Files = append(classFile.Files, newkey)
+							classJSONEdit, _ := json.Marshal(classFile)
+							uc.midclient.Put(classkey, string(classJSONEdit))
 						}
 
-						//TODO: If changed but didn't have permission to: 
-						//make new file for original
-
+					} else { //else, copy server to local...that is if server is newer
+						file.Truncate(fileinfo.Size())
+						var content []byte
+						_, readErr := syncFile.File.Read(content)
+						if readErr == nil {
+							file.Write(content)
+						}
 					}
+
+					//TODO: If changed but didn't have permission to: 
+					//make new file for original (called <filename>_original or the like)
+
 				}
 			}
 		}
 	}
+
 }
 
 //Things get pushed to the user automatically, but in case it's acting funny the user can also 
@@ -275,23 +267,23 @@ func (uc *Userclient) iEditPermissions(args *userproto.EditPermissionsArgs, repl
 
 	//go through all the users
 	for i := 0; i < len(args.Users); i++ {
-		_, exists := permissions[args.Users[i].Username]
+		_, exists := permissions[args.Users[i]]
 		//if the dude already exists then just change the permissions
 		if exists == true {
 			//if the permissions is NONE then we just remove the dude from the list
 			if args.Permission == storageproto.NONE {
-				delete(permissions, args.Users[i].Username)
+				delete(permissions, args.Users[i])
 			} else {
-				permissions[args.Users[i].Username] = args.Permission
+				permissions[args.Users[i]] = args.Permission
 			}
 		} else {
 			//otherwise we have to check if the dude is a valid dude
-			_, exists := uc.midclient.Get(args.Users[i].Username)
+			_, exists := uc.midclient.Get(args.Users[i])
 			//if he is then we can add him to the list
 			if exists != nil {
 				//if the permission is NONE then just don't add him
 				if args.Permission != storageproto.NONE {
-					permissions[args.Users[i].Username] = args.Permission
+					permissions[args.Users[i]] = args.Permission
 				}
 			}
 		}

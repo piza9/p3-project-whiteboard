@@ -4,7 +4,7 @@ import (
 	//"encoding/json"
 	//"midclient"
 	//"os"
-	"userproto"
+	"protos/userproto"
 )
 
 func NewUserclient(myhostport string, homedir string) *Userclient {

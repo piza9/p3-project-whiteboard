@@ -3,12 +3,12 @@
 package midclient
 
 import (
+	"fmt"
 	"net/rpc"
 	"os"
-	"fmt"
+	"packages/lsplog"
+	"protos/storageproto"
 	"strings"
-	"storageproto"
-	"lsplog"
 	// "storage"
 )
 
